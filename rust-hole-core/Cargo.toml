@@ -1,0 +1,10 @@
+[package]
+name = "rust-hole-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+trust-dns-server = "0.22"
+trust-dns-proto = "0.22"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
