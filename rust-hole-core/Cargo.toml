@@ -1,10 +1,17 @@
 [package]
 name = "rust-hole-core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-trust-dns-server = "0.22"
-trust-dns-proto = "0.22"
 tokio = { version = "1", features = ["full"] }
-anyhow = "1"
+async-trait = "0.1"
+anyhow = "1.0"
+hickory-server = "0.24"
+hickory-proto = "0.24"
+hickory-resolver = "0.24"
+rust-hole-db = { path = "../rust-hole-db" }
+rust-hole-api = { path = "../rust-hole-api" }
+warp = { version = "0.4.2", features = ["server"] }
+rust-embed = "8.9.0"
+mime_guess = "2.0.5"

@@ -1,4 +1,6 @@
 [workspace]
 members = [
-    "rust-hole-core"
+    "rust-hole-core",
+    "rust-hole-db",
+    "rust-hole-api"
 ]
