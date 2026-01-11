@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
 
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::RecordType;
@@ -12,23 +11,18 @@ use hickory_proto::rr::RecordType;
 use rust_hole_db::get_all_blocked_domains;
 
 // ================= Cache =================
-
-#[derive(Hash, Eq, PartialEq)]
-struct CacheKey {
-    name: String,
-    record_type: RecordType,
-}
-
 struct CacheEntry {
-    bytes: Vec<u8>,
+    msg: Message,
     expires_at: Instant,
 }
 
 // ================= DNS Server =================
-
 pub async fn run_dns() -> anyhow::Result<()> {
     let socket = UdpSocket::bind("127.0.0.2:53").await?;
     let upstream: SocketAddr = "8.8.8.8:53".parse()?;
+
+    // Upstream socket réutilisé
+    let upstream_socket = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
 
     let blocked: Vec<String> = get_all_blocked_domains()
         .await?
@@ -37,7 +31,7 @@ pub async fn run_dns() -> anyhow::Result<()> {
         .collect();
 
     let blocked = Arc::new(blocked);
-    let cache = Arc::new(Mutex::new(HashMap::<CacheKey, CacheEntry>::new()));
+    let cache = Arc::new(DashMap::<(String, RecordType), CacheEntry>::new());
 
     let mut buf = [0u8; 4096];
 
@@ -50,8 +44,6 @@ pub async fn run_dns() -> anyhow::Result<()> {
             Err(_) => continue,
         };
 
-        println!("<DNS> Message id: {:?}", msg.id());
-
         let query = match msg.queries().first() {
             Some(q) => q,
             None => continue,
@@ -59,8 +51,6 @@ pub async fn run_dns() -> anyhow::Result<()> {
 
         let name = query.name().to_utf8().trim_end_matches('.').to_string();
         let rtype = query.query_type();
-
-        println!("<DNS> {} {:?}", name, rtype);
 
         // ---------- BLOCK ----------
         if blocked.iter().any(|d| name.ends_with(d)) {
@@ -76,60 +66,45 @@ pub async fn run_dns() -> anyhow::Result<()> {
         }
 
         // ---------- CACHE ----------
-        let key = CacheKey { name: name.clone(), record_type: rtype };
-
-        if let Some(entry) = cache.lock().await.get(&key) {
+        let key = (name.clone(), rtype);
+        if let Some(entry) = cache.get(&key) {
             if Instant::now() < entry.expires_at {
-                println!("<DNS> Cache hit for {} {:?}", name, rtype);
-        
-                let mut cached_msg = Message::from_vec(&entry.bytes)?;
-                cached_msg.set_id(msg.id()); // ← ID DU CLIENT ACTUEL
-        
-                let out = cached_msg.to_vec()?;
-                socket.send_to(&out, peer).await?;
+                let mut resp_msg = entry.msg.clone();
+                resp_msg.set_id(msg.id()); // Fix ID
+                let bytes = resp_msg.to_vec()?;
+                socket.send_to(&bytes, peer).await?;
                 continue;
+            } else {
+                cache.remove(&key);
             }
         }
 
-        println!("<DNS> Cache miss for {} {:?}", name, rtype);
-
         // ---------- FORWARD RAW ----------
-        let upstream_socket = UdpSocket::bind("0.0.0.0:0").await?;
         upstream_socket.send_to(req_bytes, upstream).await?;
 
         let mut resp_buf = [0u8; 4096];
         let (resp_len, _) = upstream_socket.recv_from(&mut resp_buf).await?;
-        let resp_bytes = resp_buf[..resp_len].to_vec();
+        let resp_bytes = &resp_buf[..resp_len];
+
+        let mut resp_msg = Message::from_vec(resp_bytes)?;
 
         // ---------- CACHE STORE ----------
-        let ttl = Message::from_vec(&resp_bytes)
-            .ok()
-            .and_then(|m| m.answers().iter().map(|r| r.ttl()).min())
+        let ttl = resp_msg
+            .answers()
+            .iter()
+            .map(|r| r.ttl())
+            .min()
             .unwrap_or(60);
 
-        let new_id = Message::from_vec(&resp_bytes)?.id();
+        let cache_entry = CacheEntry {
+            msg: resp_msg.clone(),
+            expires_at: Instant::now() + Duration::from_secs(ttl as u64),
+        };
+        cache.insert(key, cache_entry);
 
-        println!("<DNS> Google ID: {:?}", new_id);
-
-        cache.lock().await.insert(
-            key,
-            CacheEntry {
-                bytes: resp_bytes.clone(),
-                expires_at: Instant::now() + Duration::from_secs(ttl as u64),
-            },
-        );
-
-        let mut resp_msg = Message::from_vec(&resp_bytes)?;
-
-        println!("<DNS> Local ID: {:?}", resp_msg.id());
-
+        // Fix ID et envoyer
         resp_msg.set_id(msg.id());
-
-        println!("<DNS> Fixed ID: {:?}", resp_msg.id());
-        let fixed_bytes: Vec<u8> = resp_msg.to_vec()?;
-
-        println!("<DNS> Fixed bytes: {:?}", fixed_bytes);
-
+        let fixed_bytes = resp_msg.to_vec()?;
         socket.send_to(&fixed_bytes, peer).await?;
     }
 }

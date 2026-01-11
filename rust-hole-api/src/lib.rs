@@ -1,48 +1,45 @@
 use axum::{
-    routing::{get, post},
+    routing::{get},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
+use rust_hole_db::get_all_blocked_domains;
+use rust_hole_db::models::blocked_domains::Model as BlockedDomainModel;
 
 #[derive(Serialize)]
 struct HelloResponse {
     message: String,
 }
 
-async fn hello() -> Json<HelloResponse> {
-    Json(HelloResponse {
-        message: "Hello from Rust API 🚀".to_string(),
-    })
-}
 
 #[derive(Deserialize)]
-struct CreateUser {
-    name: String,
+struct CreateBlockedDomain {
+    domain: String,
 }
 
 #[derive(Serialize)]
-struct User {
+struct BlockedDomain {
     id: u32,
-    name: String,
+    domain: String,
 }
 
-async fn create_user(Json(payload): Json<CreateUser>) -> Json<User> {
-    Json(User {
-        id: 1,
-        name: payload.name,
-    })
+async fn get_blocked_domains() -> Json<Vec<BlockedDomainModel>> {
+    let blocked_domains = get_all_blocked_domains().await.unwrap();
+        Json(blocked_domains)
 }
+
 
 pub async fn run_api() -> anyhow::Result<()> {
     let app = Router::new()
-        .route("/hello", get(hello))
-        .route("/users", post(create_user));
+        .route("/blocklist", get(get_blocked_domains));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 4000));
-    let listener = TcpListener::bind(addr).await.unwrap();
+    let listener = TcpListener::bind(addr).await
+        .map_err(|e| anyhow::anyhow!("Impossible de lier le port 4000: {}. Le port est peut-être déjà utilisé.", e))?;
 
+    println!("<API> Serveur API démarré sur 0.0.0.0:4000");
     axum::serve(listener, app).await?;
     Ok(())
 }
